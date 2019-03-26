@@ -1,0 +1,504 @@
+---
+title: "Student Retention"
+author: "Sandhya Suryanarayana"
+date: "March 10, 2019"
+output:
+  word_document: default
+  html_document: default
+---
+#Student Dropout Prediction
+
+##Introduction
+
+Student retention and graduation are paramount to the mission and sustainability of institutions. Here we are using predictive analytics to identify students at risk of dropping out, and using that knowledge to take steps to improve retention and graduation rates.
+
+To improve the efficiency/accuracy of prediction, 4 different models are tried with different features and different sampling technique. Even though the Bagging classification tree gave the highest prediction accuracy, the Simple decision tree being the simplest model won the contest with just 1% lower accuracy. 
+
+##Data Wrangling
+
+The Data sets provided had 5 set of folders with different number of Train and Test files.
+1) Student Progress Data: Contains student's academic progress over time from Fall       2011 to Summer 2017. These data is collected every term.
+2)Student Static Data: Contains static data like Demographics, age, Gender etc, once    for each cohert .
+3) Student Financial Aid Data: This was a single file with all finance related           information from Fall 2011 to Summer 2017.This provided information about             Scholarships, work/Study funds, Loans etc.
+4) Dropout Train Label: This CSV file contained StudentID's and if that particular       student has dropped out or not. This is used to train the models.
+5) TestIDs : This file has StudentID's for which we are predicting the Dropouts.
+
+
+```{r results='hide'}
+library(Hmisc) #Datacleaning
+library(caret)
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(ggthemes)
+library(corrplot)
+library(stringr)
+library(leaps)
+library(e1071)
+library(rattle)
+library(rpart)
+library(rpart.plot)
+library(RColorBrewer)
+```
+
+
+###Data Merging
+
+The Student Progress Data contains duplicate ID's as they are collected every term. First extract all the information for the latest Academic year as well as latest term to get unique ID's using MySql.
+The Column names in Financial Aid file have been changed for better understanding. 
+
+Import all the files in R and change the data types of each column to the required format and merge Progress, Static and Fiancial data using Primary key: StudentID.
+
+```{r results='hide'}
+
+Financial_Aid <- read.csv('Financial_Aid.csv',na.strings = "")
+Progress <- read.csv('Progress.csv',na.strings = "")
+static <- read.csv('Static.csv',na.strings = "")
+
+names(Financial_Aid)[1] <- "StudentID"
+names(Financial_Aid)[3] <-"cohortterm"
+names(Financial_Aid)[4] <- "MaritalStatus"
+names(Financial_Aid)[5] <- "AdjustedGrossIncome"
+names(Financial_Aid)[6] <- "ParentAdjustedGrossIncome"
+names(Financial_Aid)[7] <- "FatherHighestGradeLevel"
+names(Financial_Aid)[8] <- "MotherHighestGradeLevel"
+names(Financial_Aid)[10] <- "Loan2012"
+names(Financial_Aid)[11] <- "Scholarship2012"
+names(Financial_Aid)[12] <- "WorkStudy2012"
+names(Financial_Aid)[13] <- "Grant2012"
+names(Financial_Aid)[14] <- "Loan2013"
+names(Financial_Aid)[15] <- "Scholarship2013"
+names(Financial_Aid)[16] <- "WorkStudy2013"
+names(Financial_Aid)[17] <- "Grant2013"
+names(Financial_Aid)[18] <- "Loan2014"
+names(Financial_Aid)[19] <- "Scholarship2014"
+names(Financial_Aid)[20] <- "WorkStudy2014"
+names(Financial_Aid)[21] <- "Grant2014"
+names(Financial_Aid)[22] <- "Loan2015"
+names(Financial_Aid)[23] <- "Scholarship2015"
+names(Financial_Aid)[24] <- "WorkStudy2015"
+names(Financial_Aid)[25] <- "Grant2015"
+names(Financial_Aid)[26] <- "Loan2016"
+names(Financial_Aid)[27] <- "Scholarship2016"
+names(Financial_Aid)[28] <- "WorkStudy2016"
+names(Financial_Aid)[29] <- "Grant2016"
+names(Financial_Aid)[30] <- "Loan2017"
+names(Financial_Aid)[31] <- "Scholarship2017"
+names(Financial_Aid)[32] <- "WorkStudy2017"
+names(Financial_Aid)[33] <- "Grant2017"
+
+##----4.Data Manipulation----
+Merge1 <- merge(Progress,static,by='StudentID')
+Merge2 <- merge(Merge1,Financial_Aid,by='StudentID')
+
+Merge2$StudentID<- as.numeric(Merge2$StudentID)
+
+Merge2$Term <- as.factor(Merge2$Term)
+
+Merge2$CompleteDevMath <- as.factor(Merge2$CompleteDevMath)
+
+Merge2$CompleteDevEnglish <- as.factor(Merge2$CompleteDevEnglish)
+
+Merge2$Complete1 <- as.factor(Merge2$Complete1)
+
+Merge2$Gender <- as.factor(Merge2$Gender)
+
+Merge2$HsDip <- as.factor(Merge2$HsDip)
+
+Merge2$Enrollmentstatus<- as.factor(Merge2$Enrollmentstatus)
+
+Merge2$HighDeg <- as.factor(Merge2$HighDeg)
+
+Merge2$MathPlacement <- as.factor(Merge2$MathPlacement)
+
+Merge2$EngPlacement <- as.factor(Merge2$EngPlacement)
+
+Merge2$GatewayMathStatus <-as.factor(Merge2$GatewayMathStatus)
+
+Merge2$GatewayEnglishStatus<-as.factor(Merge2$GatewayEnglishStatus)
+
+Merge2$MaritalStatus <- as.factor(Merge2$MaritalStatus)
+```
+
+
+
+###Data Cleaning
+For data cleaning each of the columns are studied to understand its importance after which we can decide if it should be omitted or replaced with 0/Unknown or some other values.
+
+To get the data in the required format the following data cleaning was done on the merged data
+
+1) BirthYear: the only Null value id replaced with the average BirthYear.
+2)A new Race column was created to specify a categorical value for each the race and    -1   if the race is not present or if it is Unknown.
+3)A MaritalStatusNew column was created which replaces all the Null value with the      most occuring class(i.e Single)
+4) The NULL values in FatherHighestGradeLevel and MotherHighestGradLevel is replaced    with 'Unknown'.
+5)All the NULL values related to Financial columns like Grant, Scholarships are        imputed with 0 assuming if the information is not provided the student might not have  gotten the scholarship/Funds/Loan.
+6)A new column Funds is created for each year to repesent if the perticular student     has been involved in any kind of Loan or fund activity.(1 if YES: 0 if NO) 
+
+
+```{r results='hide'}
+
+Merge2$BirthYear <- as.numeric(Hmisc::impute(year(as.Date(as.character(Merge2$BirthYear),"%Y")),1989))
+
+Merge2$HSDipYr<-ifelse(Merge2$HSDipYr != -1,year(as.Date(as.character(Merge2$HSDipYr),"%Y")),-1)
+
+Merge2$Race <- ifelse(Merge2$Hispanic==1,1,
+                     ifelse(Merge2$AmericanIndian==1,2,
+                     ifelse(Merge2$Asian==1,3,
+                     ifelse(Merge2$Black==1,4,
+                     ifelse(Merge2$NativeHawaiian==1,5,
+                     ifelse(Merge2$White==1,6,
+                     ifelse(Merge2$TwoOrMoreRace==1,7
+                            )))))))
+Merge2$Race <- replace(Merge2$Race,is.na(Merge2$Race),-1)
+
+Merge2$Race <- as.factor(Merge2$Race)
+
+Merge2$State <- replace(Merge2$State,is.na(Merge2$State),'NJ')
+
+Merge2$MaritalStatus <- as.factor(Merge2$MaritalStatus)
+
+Merge2$MaritalStatusNew <- Hmisc::impute(Merge2$MaritalStatus,'Single')
+
+Merge2$MaritalStatusNew <- as.factor(Merge2$MaritalStatusNew)
+
+Merge2$FatherHighestGradeLevel <- Hmisc::impute(Merge2$FatherHighestGradeLevel,'Unknown')
+Merge2$MotherHighestGradeLevel <- Hmisc::impute(Merge2$MotherHighestGradeLevel,'Unknown')
+
+Merge2$AdjustedGrossIncome <- Hmisc::impute(Merge2$AdjustedGrossIncome,0)
+Merge2$ParentAdjustedGrossIncome <- Hmisc::impute(Merge2$ParentAdjustedGrossIncome,0)
+
+Merge2$Loan2012 <- Hmisc::impute(Merge2$Loan2012,0)
+Merge2$Scholarship2012 <- Hmisc::impute(Merge2$Scholarship2012,0)
+Merge2$WorkStudy2012 <- Hmisc::impute(Merge2$WorkStudy2012,0)
+Merge2$Grant2012 <- Hmisc::impute(Merge2$Grant2012,0)
+
+Merge2$Loan2013 <- Hmisc::impute(Merge2$Loan2013,0)
+Merge2$Scholarship2013 <- Hmisc::impute(Merge2$Scholarship2013,0)
+Merge2$WorkStudy2013 <- Hmisc::impute(Merge2$WorkStudy2013,0)
+Merge2$Grant2013 <- Hmisc::impute(Merge2$Grant2013,0)
+
+Merge2$Loan2014 <- Hmisc::impute(Merge2$Loan2014,0)
+Merge2$Scholarship2014 <- Hmisc::impute(Merge2$Scholarship2014,0)
+Merge2$WorkStudy2014 <- Hmisc::impute(Merge2$WorkStudy2014,0)
+Merge2$Grant2014 <- Hmisc::impute(Merge2$Grant2014,0)
+
+
+Merge2$Loan2015 <- Hmisc::impute(Merge2$Loan2015,0)
+Merge2$Scholarship2015 <- Hmisc::impute(Merge2$Scholarship2015,0)
+Merge2$WorkStudy2015 <- Hmisc::impute(Merge2$WorkStudy2015,0)
+Merge2$Grant2015 <- Hmisc::impute(Merge2$Grant2015,0)
+
+Merge2$Loan2016 <- Hmisc::impute(Merge2$Loan2016,0)
+Merge2$Scholarship2016 <- Hmisc::impute(Merge2$Scholarship2016,0)
+Merge2$WorkStudy2016 <- Hmisc::impute(Merge2$WorkStudy2016,0)
+Merge2$Grant2016 <- Hmisc::impute(Merge2$Grant2016,0)
+
+Merge2$Loan2017 <- Hmisc::impute(Merge2$Loan2017,0)
+Merge2$Scholarship2017 <- Hmisc::impute(Merge2$Scholarship2017,0)
+Merge2$WorkStudy2017 <- Hmisc::impute(Merge2$WorkStudy2017,0)
+Merge2$Grant2017 <- Hmisc::impute(Merge2$Grant2017,0)
+
+Merge2$Funds12 <- ifelse(Merge2$Scholarship2012 > 0 | Merge2$WorkStudy2012 > 0 | 
+                               Merge2$Grant2012 >0 | Merge2$Loan2012>0,1,0 )
+Merge2$Funds13 <- ifelse(Merge2$Scholarship2013 > 0 | Merge2$WorkStudy2013 > 0 | 
+                               Merge2$Grant2013 >0|Merge2$Loan2013 > 0,1,0 )
+
+Merge2$Funds14 <- ifelse(Merge2$Scholarship2014 >0 | Merge2$WorkStudy2014 > 0 | 
+                               Merge2$Grant2014 >0 | Merge2$Loan2014>0,1,0 )
+Merge2$Funds15 <- ifelse(Merge2$Scholarship2015 >0 | Merge2$WorkStudy2015 > 0 | 
+                               Merge2$Grant2015 >0 | Merge2$Loan2015>0,1,0 )
+Merge2$Funds16 <- ifelse(Merge2$Scholarship2016 >0 | Merge2$WorkStudy2016 > 0 | 
+                               Merge2$Grant2016 >0 | Merge2$Loan2016>0,1,0 )
+Merge2$Funds17 <- ifelse(Merge2$Scholarship2017 >0 | Merge2$WorkStudy2017 > 0 | 
+                               Merge2$Grant2017 >0 | Merge2$Loan2017>0,1,0 )
+
+
+Merge2$Funds12<- as.factor(Merge2$Funds12)
+Merge2$Funds13  <- as.factor(Merge2$Funds13) 
+Merge2$Funds14 <- as.factor(Merge2$Funds14)
+Merge2$Funds15 <- as.factor(Merge2$Funds15)
+Merge2$Funds16 <- as.factor(Merge2$Funds16)
+Merge2$Funds17 <- as.factor(Merge2$Funds17)
+```
+
+###Train Data
+
+Once the required format of the data is obtained, merge the DropoutTainLabel file with other datasets to get TrainData.
+
+```{r include=FALSE}
+
+TrainLabel <- read.csv('DropoutTrainLabels.csv')
+TrainLabel$StudentID <- as.numeric(TrainLabel$StudentID)
+TrainLabel$Dropout <- as.factor(TrainLabel$Dropout)
+
+TrainData <- merge(Merge2,TrainLabel,by='StudentID')
+
+```
+
+###Test Data
+
+Merge TestIDs file with the merged Progress, Static and Financial dataset using Unique StudentID column to form the final TestData.
+
+```{r results='hide'}
+TestID <- read.csv('TestIDs.csv')
+TestID$StudentID <- as.numeric(TestID$StudentID)
+TestData <- merge(Merge2,TestID,by='StudentID')
+```
+
+##Exploratory Data Analysis
+
+As we know, In Data Science 80% of the time is spent in data preparation.
+Let's do exploratory data analysis to have a better understanding of the data and helps us investigate the relationship between the variables.
+
+1) Lets understand the total number of dropouts out of entire student population.
+
+  We can see in the below graph that the number of students dropping out is increasing   every year and reached its highest in 2015. Something happened in 2015-16 academic    year that made lot of students to dropout.
+  
+2) The below graph of Number of DropOuts Vs race shows that the trend of dropouts is     higher for Race 1(Hispanic) followed by White race.
+
+3)Now, lets have a look at how the Cumulative GPA affects the dropouts.
+  As we can see, though the number of Dropouts are highest with GPA = 0. there are      also lot of dropouts for students with more than 3.5
+  
+4)Here in the below graph we can see that, the students who have received any kind of   certificate/graduate awards are the least dropouts. Out of 3500 stdents who have      received awards, only 100 students have dropped out.
+  It can be because students who get certified or gets rewarded could be more           motivated or be more interested in higher education.
+
+*Remove columns that has all NULL or all constants and store the rest of the variables*
+
+
+```{r include=FALSE}
+
+Feature_1 <- TrainData[c("StudentID","Term","CompleteDevMath","CompleteDevEnglish",
+                         "Major1","Complete1","CumGPA","State","Gender" ,"BirthYear",
+                         "HsDip","HSDipYr","Enrollmentstatus","NumColCredAttemptTransfer",
+                         "GatewayMathStatus","GatewayEnglishStatus","FatherHighestGradeLevel",
+                         "MotherHighestGradeLevel","Race","Funds12" ,"Funds13","Funds14","Funds15","Funds16",
+                         "Funds17", "MaritalStatusNew","Dropout")]
+```
+
+
+###Correlation Matrix
+
+```{r Results=FALSE}
+Feature_co_2r <- TrainData[c(5,28,29,10,11,24,25,26)]
+correlation_2 <- as.matrix(Feature_co_2r,use="pairwise.complete.obs")
+cor_mat<-rcorr(correlation_2)
+cor_mat$r
+```
+
+
+##Feature Selection
+
+When Best subset selection method is used on all the variables to select the feature variables, the adjusted R^2 gives 20 variables and BIC gives 16 feature variable.
+
+First lets use 16 variable to build the model. 
+
+```{r results='hide',out.width='25%',fig.show='hold'}
+Feature_subset <- Feature_1[c("StudentID","Term","CompleteDevMath",
+                              "Major1","Complete1","CumGPA","Gender" ,"BirthYear",
+                              "HsDip","Enrollmentstatus","FatherHighestGradeLevel",
+                              "MotherHighestGradeLevel",
+                              "Race","Funds12"                       ,"Funds13","Funds14","Funds15","Funds16",
+                              "Funds17", "MaritalStatusNew","Dropout")]
+bstsubset <- regsubsets(Dropout ~.-StudentID, data=Feature_subset,nvmax=20)
+reg.summary <-summary(bstsubset)
+reg.summary$adjr2#20
+reg.summary$bic#16
+which.max(reg.summary$adjr2)
+which.min(reg.summary$bic)
+
+plot(reg.summary$bic,xlab="Number of Variables",ylab="bic",type="l")
+points(16,reg.summary$bic[16], col="red",cex=2,pch=20)
+coef(bstsubset,16)
+
+plot(reg.summary$adjr2,xlab="Number of Variables",ylab="Adjusted R^2",type="l")
+points(20,reg.summary$adjr2[20], col="red",cex=2,pch=20)
+coef(bstsubset,20)
+
+```
+
+```{r  out.width='25%',fig.show='hold'}
+which.max(reg.summary$adjr2)
+which.min(reg.summary$bic)
+
+plot(reg.summary$bic,xlab="Number of Variables",ylab="bic",type="l")
+points(16,reg.summary$bic[16], col="red",cex=2,pch=20)
+coef(bstsubset,16)
+
+plot(reg.summary$adjr2,xlab="Number of Variables",ylab="Adjusted R^2",type="l")
+points(20,reg.summary$adjr2[20], col="red",cex=2,pch=20)
+coef(bstsubset,20)
+```
+
+
+##Model Building
+
+###Model 1: Classification tree
+Lets build a simple decision tree with a K fold cross validation with 10 fold with all the features selected by our Best Subset selection method. 
+
+```{r out.width='25%',fig.show='hold'}
+
+trctrl <- trainControl(method = "cv", number = 10)
+
+tree_fit <- train(Dropout ~ Term+CompleteDevMath+Major1+Complete1+ CumGPA+BirthYear
+                  +HSGPAUnwtd+Enrollmentstatus+NumColCredAttemptTransfer+HighDeg
+                  +GatewayEnglishStatus+MaritalStatusNew+
+                    Funds17+Funds13+Funds15,
+                  data = TrainData, method = "rpart",
+                  trControl=trctrl)
+
+tree_fit$finalModel
+tree_fit$bestTune
+tree_fit$results
+plot(tree_fit)
+fancyRpartPlot(tree_fit$finalModel)
+predict_tree <- predict(tree_fit,TestData)
+predict_df <- cbind.data.frame(TestData$StudentID,predict_tree)
+#names(predict_df) <- c('StudentID','DropOuts')
+treeImp <- varImp(tree_fit, scale = TRUE)
+plot(treeImp)
+
+```
+
+We can see from the Variable importance plot that for this model 'complete1' plays the most important role for the model followed by CumGPA, Funds17, Major1, EnrollmentStatus and NumColCredAttemptTransfer. Rest of the variable has 0% importance which can be removed to make the model more efficient.
+The Decision tree result:
+Accuracy = 90.7%
+cp = 0.03
+Kappa = 80.7%
+
+###Model 2: Support Vector Machine: Radial Kernel 
+
+A small variation was made to the feature variable was made based on Best Subset collection with 20 variables. Adding Race, Funds12 and Funds16
+
+```{r echo=FALSE,out.width='25%',fig.show='hold'}
+trctrl <- trainControl(method = "cv", number = 10)
+DropSVMRad <- train(Dropout ~ Term+CompleteDevMath+Major1+Complete1+CumGPA 
+                    + Gender+Race+ BirthYear+Funds12+Funds13
+                    +Funds16+Funds17
+                    ,method="svmRadial",trControl=trctrl,data=TrainData)
+DropSVMRad
+#See model fit details
+DropSVMRad$finalModel
+DropSVMRad$bestTune
+#See the results details by each optimization run
+DropSVMRad$results
+#Predict test dataset
+SVMpredict_Test <- predict(DropSVMRad,TestData)
+```
+The accuracy here is increased by 1% than Decision tree model.
+
+Accuracy : 91.3%
+Kappa: 80.55%
+Sigma: 0.03
+Cost : 1
+
+
+### Model 3: Ensemble model(Bagging)
+
+```{r echo =FALSE,out.width='25%',fig.show='hold'}
+trctrl <- trainControl(method = "cv", number = 10)
+BagFitTest <- train(Dropout ~Term+CompleteDevMath+Major1+Complete1+CumGPA 
+                + Gender+Race+ BirthYear+Funds12+Funds13
+                +Funds16+Funds17, data = TrainData, method = "treebag",
+                trControl=trctrl)
+BagFitTest
+bagImp <- varImp(BagFitTest, scale=TRUE)
+bagImp
+plot(bagImp)
+BegFitPredictTest <- predict(BagFitTest, newdata = TestData)
+
+```
+We can see in the variable importance plot that almost all of the variables place an important role while building the model.
+For Bagging model we get:
+Accuracy: 91.7% 
+Kappa : 81.39%
+
+###Model 4: Random forest
+
+```{r echo = FALSE,out.width='25%',fig.show='hold'}
+trctrl <- trainControl(method = "cv", number = 10)
+#Fit the random forest (method = "rf"). Set importance = TRUE to have the variable importance calculated.
+#Parameter mtry in the train function lets you set how many variables are considered at each split
+RfTest <- train(Dropout ~Term+CompleteDevMath+Major1+Complete1+CumGPA 
+                 + Gender+Race+ BirthYear+Funds12+Funds13+Funds14+Funds15
+                 +Funds16+Funds17, data = TrainData, method = "rf",importance = T,
+                 trControl=trctrl)
+RfTest
+#To see the tuned mtry parameter.  
+RfTest$bestTune
+#To see the the % variance explained
+RfTest$finalModel
+#Plot complexity parameter tuning runs
+plot(RfTest)
+#Predict
+RfTestPredict<- predict(RfTest, newdata = TestData)
+
+
+```
+
+This model gives the best accuracy of 92.65% making with highest accuracy among the 4 models.
+The number of randomly selected predictors(mtry):12
+Out of Bag error estimate: 7.36%
+
+###Receiver Operating Characteristic curve(ROC curve):
+ROC is a plot of the false positive rate versus the true positive rate for a number of different candidate threshold values between 0.0 and 1.0.
+A model with perfect skill is represented at a higher point.
+
+```{r echo = FALSE,out.width='25%',fig.show='hold'}
+intrain <- createDataPartition(TrainData$Dropout,p=0.70,list = FALSE)
+train1 <- TrainData[intrain,]
+test1 <- TrainData[-intrain,]
+trctrl <- trainControl(method = "cv", number = 10)
+
+tree_fit_train <- train(Dropout ~ Term+CompleteDevMath+Major1+Complete1+ CumGPA+BirthYear
+                  +HSGPAUnwtd+Enrollmentstatus+NumColCredAttemptTransfer+HighDeg
+                  +GatewayEnglishStatus+MaritalStatusNew+
+                    Funds17+Funds13+Funds15,
+                  data = train1, method = "rpart",
+                  trControl=trctrl)
+
+predict_tree_Test <- predict(tree_fit_train,test1)
+
+SVMRad_train <- train(Dropout ~ Term+CompleteDevMath+Major1+Complete1+CumGPA 
+                   + Gender+Race+ BirthYear+Funds12+Funds13
+                   +Funds16+Funds17
+                   ,method="svmRadial",
+                   trControl=trctrl,data=train1)
+SVMpredict_Test <- predict(SVMRad_train,test1)
+
+BagFit_Train <- train(Dropout ~Term+CompleteDevMath+Major1+Complete1+CumGPA 
+                + Gender+Race+ BirthYear+Funds12+Funds13
+                +Funds16+Funds17, data = train1, method = "treebag",
+                 trControl=trctrl)
+BegFitPredict_Test <- predict(BagFit_Train, newdata = test1)
+
+RfTrain_Train <- train(Dropout ~Term+CompleteDevMath+Major1+Complete1+CumGPA 
+                    + Gender+Race+ BirthYear+Funds12+Funds13+Funds14+Funds15
+                    +Funds16+Funds17, data = train1, method = "rf",importance = T,
+                    trControl=trctrl)
+
+RfTrainPredict_Test<- predict(RfTrain_Train, newdata = test1)
+```
+
+```{r}
+library(ROCR)
+ROCRpred1 <- prediction(as.numeric(predict_tree_Test), as.numeric(test1$Dropout))
+ROCRpred2 <- prediction(as.numeric(SVMpredict_Test), as.numeric(test1$Dropout))
+ROCRpred3 <- prediction(as.numeric(BegFitPredict_Test), as.numeric(test1$Dropout))
+ROCRpred4 <- prediction(as.numeric(RfTrainPredict_Test), as.numeric(test1$Dropout))
+#ROC Curve
+ROCRperf1 <- performance(ROCRpred1, 'tpr','fpr')
+ROCRperf2 <- performance(ROCRpred2, 'tpr','fpr')
+ROCRperf3 <- performance(ROCRpred3, 'tpr','fpr')
+ROCRperf4 <- performance(ROCRpred4, 'tpr','fpr')
+plot(ROCRperf1,col = 'Red')
+abline(0, 1)
+plot(ROCRperf2, add = TRUE, col = 'Yellow')
+plot(ROCRperf3, add = TRUE, col='black')
+plot(ROCRperf4, add = TRUE, Col='Orange')
+legend(x=-0.1,y=1.3,legend=paste(rep(c("Red","Yellow","Orange","Blue")),
+                               rep(c("Decision Tree","SVM predict","Bagging","Random Forest"))
+                               ,sep=":"),pch=rep(c(16,18),each=4),bty="n",
+                                ncol=2,cex=0.7,pt.cex=0.7,xpd=TRUE)
+
+```
+
